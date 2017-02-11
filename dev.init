@@ -1,0 +1,61 @@
+#!/bin/busybox sh
+
+echo "********************************************************"
+echo "***             DEV MODE INIT STARTED                ***"
+echo "********************************************************"
+
+IMGPART=/dev/sda2
+IMGFILE=/volumio_current.sqsh
+DEVMODE=true
+
+mount -t ext4 ${IMGPART} /mnt/imgpart
+
+# 2) init a loop pointing to the image file
+loop_free=$(losetup -f | sed s#p/#p#)
+losetup $loop_free /mnt/imgpart/${IMGFILE}
+
+# 3) mount the squashfs to /mnt/static
+[ -d /mnt/static ] || mkdir /mnt/static
+mount -t squashfs $loop_free /mnt/static
+
+#if not exists create data partition
+if [ ! -b "/dev/sda3" ]; then
+  echo "Volumio data partition missing. Create it."
+  #Start value fixed as 1920, look at raspberryimage.sh for it
+  START="$(parted -s /dev/sda print free | grep 1920 | grep Free | awk '{print $1}' | grep -o '[0-9]\+')"
+  END="$(parted -s /dev/sda print free | grep 1920 | grep Free | awk '{print $2}' | grep -o '[0-9]\+')"
+
+  parted -s /dev/sda mkpart primary ext3 ${START} ${END}
+  partprobe /dev/sda
+
+  #refreshing /dev/ for the new partition
+  mdev -s
+
+  mkfs.ext4 -E stride=2,stripe-width=1024 -b 4096 /dev/sda3 -L volumio_data
+fi
+[ -d /mnt/ext ] || mkdir /mnt/ext
+mount -t ext4 /dev/sda3 /mnt/ext
+
+[ -d /mnt/ext/dyn ] || mkdir /mnt/ext/dyn
+[ -d /mnt/ext/work ] || mkdir /mnt/ext/work
+[ -d /mnt/ext/union ] || mkdir /mnt/ext/union
+
+# 5) mount the writable overlay to the static image
+mount -t overlay -olowerdir=/mnt/static,upperdir=/mnt/ext/dyn,workdir=/mnt/ext/work overlay /mnt/ext/union
+
+# Clean up.
+[ -d /mnt/ext/union/static ] || mkdir /mnt/ext/union/static
+[ -d /mnt/ext/union/imgpart ] || mkdir /mnt/ext/union/imgpart
+mount --move /mnt/static /mnt/ext/union/static
+mount --move /mnt/imgpart /mnt/ext/union/imgpart
+
+chmod -R 777 /mnt/ext/union/imgpart
+
+umount /proc
+umount /sys
+
+# Boot the real thing.
+exec switch_root /mnt/ext/union /sbin/init
+
+echo "Failed to switch_root, dropping to a shell"
+exec /bin/sh
